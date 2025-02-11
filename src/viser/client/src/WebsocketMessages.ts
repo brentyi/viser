@@ -235,6 +235,40 @@ export interface SkinnedMeshMessage {
     skin_weights: Uint8Array;
   };
 }
+/** Message from server->client carrying batched meshes information.
+ *
+ * (automatically generated)
+ */
+export interface BatchedMeshesMessage {
+  type: "BatchedMeshesMessage";
+  name: string;
+  props: {
+    vertices: Uint8Array;
+    faces: Uint8Array;
+    color: [number, number, number] | null;
+    wireframe: boolean;
+    opacity: number | null;
+    flat_shading: boolean;
+    side: "front" | "back" | "double";
+    material: "standard" | "toon3" | "toon5";
+    batched_wxyzs: Uint8Array;
+    batched_positions: Uint8Array;
+  };
+}
+/** Message from server->client carrying batched GLB information.
+ *
+ * (automatically generated)
+ */
+export interface BatchedGlbMessage {
+  type: "BatchedGlbMessage";
+  name: string;
+  props: {
+    glb_data: Uint8Array;
+    scale: number;
+    batched_wxyzs: Uint8Array;
+    batched_positions: Uint8Array;
+  };
+}
 /** Message for transform gizmos.
  *
  * (automatically generated)
@@ -1208,6 +1242,8 @@ export type Message =
   | SpotLightMessage
   | MeshMessage
   | SkinnedMeshMessage
+  | BatchedMeshesMessage
+  | BatchedGlbMessage
   | TransformControlsMessage
   | ImageMessage
   | LineSegmentsMessage
@@ -1292,6 +1328,8 @@ export type SceneNodeMessage =
   | SpotLightMessage
   | MeshMessage
   | SkinnedMeshMessage
+  | BatchedMeshesMessage
+  | BatchedGlbMessage
   | TransformControlsMessage
   | ImageMessage
   | LineSegmentsMessage
@@ -1336,6 +1374,8 @@ const typeSetSceneNodeMessage = new Set([
   "SpotLightMessage",
   "MeshMessage",
   "SkinnedMeshMessage",
+  "BatchedMeshesMessage",
+  "BatchedGlbMessage",
   "TransformControlsMessage",
   "ImageMessage",
   "LineSegmentsMessage",

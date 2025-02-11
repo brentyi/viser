@@ -1,5 +1,6 @@
+import { InstancedMesh2 } from "@three.ez/instanced-mesh";
 import { Instance, Instances, Line, shaderMaterial } from "@react-three/drei";
-import { createPortal, useFrame, useThree } from "@react-three/fiber";
+import { extend, createPortal, useFrame, useThree } from "@react-three/fiber";
 import { Outlines } from "./Outlines";
 import React from "react";
 import { HoverableContext } from "./HoverContext";
@@ -30,8 +31,23 @@ import {
   MeshMessage,
   PointCloudMessage,
   SkinnedMeshMessage,
+  BatchedMeshesMessage,
+  GlbMessage,
+  BatchedGlbMessage,
 } from "./WebsocketMessages";
+import { Object3DNode } from "@react-three/fiber";
 import { ViewerContext } from "./ViewerContext";
+import { simplify } from '@gltf-transform/functions'
+import { NodeIO } from "@gltf-transform/core";
+import { MeshoptSimplifier } from "meshoptimizer";
+
+declare module "@react-three/fiber" {
+  interface ThreeElements {
+    instancedMesh2: Object3DNode<InstancedMesh2, typeof InstancedMesh2>;
+  }
+}
+
+extend({ InstancedMesh2 });
 
 type AllPossibleThreeJSMaterials =
   | MeshBasicMaterial
@@ -166,101 +182,275 @@ export const PointCloud = React.forwardRef<THREE.Points, PointCloudMessage>(
 /** Component for rendering the contents of GLB files. */
 export const GlbAsset = React.forwardRef<
   THREE.Group,
-  { glb_data: Uint8Array<ArrayBuffer>; scale: number }
->(function GlbAsset({ glb_data, scale }, ref) {
-  // We track both the GLTF asset itself and all meshes within it. Meshes are
-  // used for hover effects.
+  GlbMessage | BatchedGlbMessage
+>(function GlbAsset(message, ref) {
+  // Create persistent geometry and material. Set attributes when we receive updates.
   const [gltf, setGltf] = React.useState<GLTF>();
   const [meshes, setMeshes] = React.useState<THREE.Mesh[]>([]);
-
-  // glTF/GLB files support animations.
+  
+  // Create mixer ref for animations
   const mixerRef = React.useRef<THREE.AnimationMixer | null>(null);
 
-  React.useEffect(() => {
+  // Setup GLB loader once
+  const loader = React.useMemo(() => {
     const loader = new GLTFLoader();
-
-    // We use a CDN for Draco. We could move this locally if we want to use Viser offline.
     const dracoLoader = new DRACOLoader();
     dracoLoader.setDecoderPath("https://www.gstatic.com/draco/v1/decoders/");
     loader.setDRACOLoader(dracoLoader);
+    return loader;
+  }, []);
 
+  // Handle loading and cleanup of GLB data
+  React.useEffect(() => {
+    const glb_data = new Uint8Array(message.props.glb_data);
     loader.parse(
       glb_data.buffer,
       "",
       (gltf) => {
+        // Handle animations if present
         if (gltf.animations && gltf.animations.length) {
           mixerRef.current = new THREE.AnimationMixer(gltf.scene);
           gltf.animations.forEach((clip) => {
             mixerRef.current!.clipAction(clip).play();
           });
         }
+
+        // Collect all meshes for hover effects
         const meshes: THREE.Mesh[] = [];
-        gltf?.scene.traverse((obj) => {
+        gltf.scene.traverse((obj) => {
           if (obj instanceof THREE.Mesh) meshes.push(obj);
         });
+
         setMeshes(meshes);
         setGltf(gltf);
       },
       (error) => {
-        console.log("Error loading GLB!");
-        console.log(error);
-      },
+        console.error("Error loading GLB:", error);
+      }
     );
 
+    // Cleanup function
     return () => {
-      if (mixerRef.current) mixerRef.current.stopAllAction();
+      // Stop any running animations
+      if (mixerRef.current) {
+        mixerRef.current.stopAllAction();
+        mixerRef.current = null;
+      }
 
-      function disposeNode(node: any) {
-        if (node instanceof THREE.Mesh) {
-          if (node.geometry) {
-            node.geometry.dispose();
-          }
-          if (node.material) {
-            if (Array.isArray(node.material)) {
-              node.material.forEach((material) => {
-                disposeMaterial(material);
-              });
-            } else {
-              disposeMaterial(node.material);
+      // Dispose of resources
+      if (gltf) {
+        const disposeNode = (node: any) => {
+          if (node instanceof THREE.Mesh) {
+            if (node.geometry) {
+              node.geometry.dispose();
+            }
+            if (node.material) {
+              if (Array.isArray(node.material)) {
+                node.material.forEach(disposeMaterial);
+              } else {
+                disposeMaterial(node.material);
+              }
             }
           }
-        }
-      }
-      function disposeMaterial(material: AllPossibleThreeJSMaterials) {
-        if ("map" in material) material.map?.dispose();
-        if ("lightMap" in material) material.lightMap?.dispose();
-        if ("bumpMap" in material) material.bumpMap?.dispose();
-        if ("normalMap" in material) material.normalMap?.dispose();
-        if ("specularMap" in material) material.specularMap?.dispose();
-        if ("envMap" in material) material.envMap?.dispose();
-        if ("alphaMap" in material) material.alphaMap?.dispose();
-        if ("aoMap" in material) material.aoMap?.dispose();
-        if ("displacementMap" in material) material.displacementMap?.dispose();
-        if ("emissiveMap" in material) material.emissiveMap?.dispose();
-        if ("gradientMap" in material) material.gradientMap?.dispose();
-        if ("metalnessMap" in material) material.metalnessMap?.dispose();
-        if ("roughnessMap" in material) material.roughnessMap?.dispose();
-        material.dispose(); // disposes any programs associated with the material
-      }
+        };
 
-      // Attempt to free resources.
-      gltf?.scene.traverse(disposeNode);
+        const disposeMaterial = (material: AllPossibleThreeJSMaterials) => {
+          if ("map" in material) material.map?.dispose();
+          if ("lightMap" in material) material.lightMap?.dispose();
+          if ("bumpMap" in material) material.bumpMap?.dispose();
+          if ("normalMap" in material) material.normalMap?.dispose();
+          if ("specularMap" in material) material.specularMap?.dispose();
+          if ("envMap" in material) material.envMap?.dispose();
+          if ("alphaMap" in material) material.alphaMap?.dispose();
+          if ("aoMap" in material) material.aoMap?.dispose();
+          if ("displacementMap" in material) material.displacementMap?.dispose();
+          if ("emissiveMap" in material) material.emissiveMap?.dispose();
+          if ("gradientMap" in material) material.gradientMap?.dispose();
+          if ("metalnessMap" in material) material.metalnessMap?.dispose();
+          if ("roughnessMap" in material) material.roughnessMap?.dispose();
+          material.dispose();
+        };
+
+        gltf.scene.traverse(disposeNode);
+      }
     };
-  }, [glb_data]);
+  }, [loader, message.props.glb_data]);
 
+  // Handle animation updates
   useFrame((_, delta) => {
     if (mixerRef.current) {
       mixerRef.current.update(delta);
     }
   });
 
+  // Create the instanced meshes for batched GLBs
+  const instancedMeshes = React.useMemo(() => {
+    if (message.type !== "BatchedGlbMessage" || !gltf) return null;
+    
+    // Clone the GLTF scene for instancing
+    const scene = gltf.scene.clone();
+    const instancedMeshes: InstancedMesh2[] = [];
+
+    const batched_positions = new Float32Array(
+      message.props.batched_positions.buffer.slice(
+        message.props.batched_positions.byteOffset,
+        message.props.batched_positions.byteOffset + message.props.batched_positions.byteLength
+      )
+    );
+
+    // Setup instancing for each mesh in the scene
+    scene.traverse((node) => {
+      if (node instanceof THREE.Mesh) {
+        const instancedMesh = new InstancedMesh2(
+          node.geometry.clone(),
+          node.material,
+          {
+            capacity: batched_positions.length / 3,
+            createEntities: true,
+          }
+        );
+
+        // Replace original mesh with instanced version
+        if (node.parent) {
+          node.parent.add(instancedMesh);
+          node.parent.remove(node);
+        }
+
+        const addLODs = (mesh: THREE.Mesh, ratios: number[], distances: number[]) => {
+          ratios.forEach((ratio, index) => {
+            const targetCount = Math.floor(mesh.geometry.index!.array.length * ratio / 3) * 3;
+            const lodGeometry = mesh.geometry.clone();
+
+            const dstIndexArray = MeshoptSimplifier.simplify(
+              new Uint32Array(lodGeometry.index!.array),
+              new Float32Array(lodGeometry.attributes.position.array),
+              3,
+              targetCount,
+              0.1,
+            )[0];
+
+            lodGeometry.index!.array.set(dstIndexArray);
+            lodGeometry.index!.needsUpdate = true;
+            lodGeometry.setDrawRange(0, dstIndexArray.length);
+            instancedMesh.addLOD(lodGeometry, mesh.material, distances[index]);
+          });
+        };
+        const ratios = [0.01];
+        const distances = [2];
+        addLODs(node, ratios, distances);
+        
+        // Initial setup of instances
+        instancedMesh.addInstances(batched_positions.length / 3, () => {});
+        instancedMeshes.push(instancedMesh);
+      }
+    });
+    
+    return { scene, instancedMeshes };
+  }, [message.type, gltf, ...(message.type === "BatchedGlbMessage" ? [message.props.batched_wxyzs] : [])]);
+
+  // Handle updates to instance positions/orientations
+  React.useEffect(() => {
+    if (message.type !== "BatchedGlbMessage" || !instancedMeshes) return;
+    if (instancedMeshes.instancedMeshes.length !== meshes.length) return;
+
+    const batched_positions = new Float32Array(
+      message.props.batched_positions.buffer.slice(
+        message.props.batched_positions.byteOffset,
+        message.props.batched_positions.byteOffset + message.props.batched_positions.byteLength
+      )
+    );
+
+    const batched_wxyzs = new Float32Array(
+      message.props.batched_wxyzs.buffer.slice(
+        message.props.batched_wxyzs.byteOffset,
+        message.props.batched_wxyzs.byteOffset + message.props.batched_wxyzs.byteLength
+      )
+    );
+
+    // Pre-allocate matrices to avoid garbage collection
+    // const T_world_obj = new THREE.Matrix4();
+    // const T_world_mesh = new THREE.Matrix4();
+    // const T_obj_mesh = new THREE.Matrix4();
+    // const tmpQuat = new THREE.Quaternion();
+
+    instancedMeshes.instancedMeshes.forEach((instancedMesh, mesh_index) => {
+      // Get the original mesh's transform relative to the GLB root
+      // if (instancedMesh.parent) {
+      //   T_obj_mesh.copy(instancedMesh.matrix);
+      // }
+
+      instancedMesh.updateInstances((obj, index) => {
+        obj.position.set(
+          batched_positions[index * 3 + 0],
+          batched_positions[index * 3 + 1],
+          batched_positions[index * 3 + 2]
+        )
+        obj.quaternion.set(
+          batched_wxyzs[index * 4 + 1],
+          batched_wxyzs[index * 4 + 2],
+          batched_wxyzs[index * 4 + 3],
+          batched_wxyzs[index * 4 + 0]
+        )
+        // Set object-to-world transform
+        // T_world_obj.makeRotationFromQuaternion(
+        //   tmpQuat.set(
+        //     batched_wxyzs[index * 4 + 1],
+        //     batched_wxyzs[index * 4 + 2],
+        //     batched_wxyzs[index * 4 + 3],
+        //     batched_wxyzs[index * 4 + 0]
+        //   )
+        // ).setPosition(
+        //   batched_positions[index * 3 + 0],
+        //   batched_positions[index * 3 + 1],
+        //   batched_positions[index * 3 + 2]
+        // );
+
+        // T_obj_mesh.makeRotationFromQuaternion(
+        //   tmpQuat.set(
+        //     meshes[mesh_index].quaternion.x,
+        //     meshes[mesh_index].quaternion.y,
+        //     meshes[mesh_index].quaternion.z,
+        //     meshes[mesh_index].quaternion.w
+        //   )
+        // ).setPosition(
+        //   meshes[mesh_index].position.x,
+        //   meshes[mesh_index].position.y,
+        //   meshes[mesh_index].position.z
+        // );
+
+        // // Combine transforms: T_world_mesh = T_world_obj * T_obj_mesh
+        // T_world_mesh.copy(T_world_obj) // .multiply(T_obj_mesh);
+
+        // // Extract position and rotation from final transform
+        // obj.position.setFromMatrixPosition(T_world_mesh);
+        // obj.quaternion.setFromRotationMatrix(T_world_mesh);
+      });
+    });
+  }, [
+    message.type,
+    instancedMeshes,
+    ...(message.type === "BatchedGlbMessage" ? [
+      message.props.batched_positions,
+      message.props.batched_wxyzs
+    ] : [])
+  ]);
+
+  if (!gltf) return null;
+
   return (
     <group ref={ref}>
-      {gltf === undefined ? null : (
+      {message.type === "BatchedGlbMessage" ? (
+        instancedMeshes && (
+          <>
+            <primitive object={instancedMeshes.scene} scale={message.props.scale} />
+            <OutlinesIfHovered alwaysMounted={false} />
+          </>
+        )
+      ) : (
         <>
-          <primitive object={gltf.scene} scale={scale} />
-          {meshes.map((mesh) =>
-            createPortal(<OutlinesIfHovered alwaysMounted />, mesh),
+          <primitive object={gltf.scene} scale={message.props.scale} />
+          {meshes.map((mesh, i) =>
+            createPortal(<OutlinesIfHovered alwaysMounted />, mesh)
           )}
         </>
       )}
@@ -430,8 +620,8 @@ export const InstancedAxes = React.forwardRef<
 
 /** Convert raw RGB color buffers to linear color buffers. **/
 export const ViserMesh = React.forwardRef<
-  THREE.Mesh | THREE.SkinnedMesh,
-  MeshMessage | SkinnedMeshMessage
+  THREE.Mesh | THREE.SkinnedMesh | THREE.Group,
+  MeshMessage | SkinnedMeshMessage | BatchedMeshesMessage
 >(function ViserMesh(message, ref) {
   const viewer = React.useContext(ViewerContext)!;
 
@@ -502,6 +692,8 @@ export const ViserMesh = React.forwardRef<
     () => new THREE.BufferGeometry(),
   );
   const [skeleton, setSkeleton] = React.useState<THREE.Skeleton>();
+
+  // Setup geometry attributes
   React.useEffect(() => {
     geometry.setAttribute(
       "position",
@@ -530,6 +722,7 @@ export const ViserMesh = React.forwardRef<
     geometry.computeVertexNormals();
     geometry.computeBoundingSphere();
 
+    // Handle skinned mesh setup if needed
     let skeleton = undefined;
     if (message.type === "SkinnedMeshMessage") {
       // Skinned mesh.
@@ -642,33 +835,97 @@ export const ViserMesh = React.forwardRef<
     };
   }, [geometry]);
 
-  // Update bone transforms for skinned meshes.
-  useFrame(() => {
-    if (message.type !== "SkinnedMeshMessage") return;
-
-    const parentNode = viewer.nodeRefFromName.current[message.name];
-    if (parentNode === undefined) return;
-
-    const state = viewer.skinnedMeshState.current[message.name];
-    const bones = bonesRef.current;
-    if (skeleton !== undefined && bones !== undefined) {
-      if (!state.initialized) {
-        bones.forEach((bone) => {
-          parentNode.add(bone);
-        });
-        state.initialized = true;
+  // Create the instanced mesh once.
+  const instancedMesh = React.useMemo(() => {
+    if (message.type !== "BatchedMeshesMessage" || !material) return null;
+    
+    const num_insts = new Float32Array(
+      message.props.batched_wxyzs.buffer.slice(
+        message.props.batched_wxyzs.byteOffset,
+        message.props.batched_wxyzs.byteOffset +
+          message.props.batched_wxyzs.byteLength,
+      ),
+    ).length / 4;
+    const mesh = new InstancedMesh2(geometry, material,
+      {
+        capacity: num_insts,
+        createEntities: true,
       }
-      bones.forEach((bone, i) => {
-        const wxyz = state.poses[i].wxyz;
-        const position = state.poses[i].position;
-        bone.quaternion.set(wxyz[1], wxyz[2], wxyz[3], wxyz[0]);
-        bone.position.set(position[0], position[1], position[2]);
-      });
-    }
-  });
+    );
+
+    // Initial setup of instances.
+    mesh.addInstances(num_insts, () => {});
+
+    return mesh;
+  }, [
+    message.type,
+    material,
+    geometry,
+    ...(message.type === "BatchedMeshesMessage" ? [
+      message.props.batched_wxyzs.length,
+    ] : [])]);
+
+  // Handle updates to instance positions/orientations
+  React.useEffect(() => {
+    if (message.type !== "BatchedMeshesMessage" || !instancedMesh) return;
+
+    const batched_positions = new Float32Array(
+      message.props.batched_positions.buffer.slice(
+        message.props.batched_positions.byteOffset,
+        message.props.batched_positions.byteOffset +
+          message.props.batched_positions.byteLength,
+      ),
+    );
+
+    const batched_wxyzs = new Float32Array(
+      message.props.batched_wxyzs.buffer.slice(
+        message.props.batched_wxyzs.byteOffset,
+        message.props.batched_wxyzs.byteOffset +
+          message.props.batched_wxyzs.byteLength,
+      ),
+    );
+
+    console.log("updating instances");
+    instancedMesh.updateInstances((obj, index) => {
+      obj.position.set(
+        batched_positions[index * 3 + 0],
+        batched_positions[index * 3 + 1],
+        batched_positions[index * 3 + 2],
+      );
+      obj.quaternion.set(
+        batched_wxyzs[index * 4 + 1],
+        batched_wxyzs[index * 4 + 2],
+        batched_wxyzs[index * 4 + 3],
+        batched_wxyzs[index * 4 + 0],
+      );
+    });
+  }, [
+    message.type,
+    instancedMesh,
+    ...(message.type === "BatchedMeshesMessage"
+      ? [
+          message.props.batched_positions.buffer,
+          message.props.batched_wxyzs.buffer,
+        ]
+      : []),
+  ]);
 
   if (geometry === undefined || material === undefined) {
-    return;
+    return null;
+  }
+
+  // Render the appropriate mesh type
+  if (message.type === "BatchedMeshesMessage") {
+    return (
+      <group ref={ref as React.ForwardedRef<THREE.Group>}>
+        {instancedMesh && (
+          <>
+            <primitive object={instancedMesh} />
+            <OutlinesIfHovered alwaysMounted />
+          </>
+        )}
+      </group>
+    );
   } else if (message.type === "SkinnedMeshMessage") {
     return (
       <skinnedMesh
@@ -676,18 +933,12 @@ export const ViserMesh = React.forwardRef<
         geometry={geometry}
         material={material}
         skeleton={skeleton}
-        // TODO: leaving culling on (default) sometimes causes the
-        // mesh to randomly disappear, as of r3f==8.16.2.
-        //
-        // Probably this is because we don't update the bounding
-        // sphere after the bone transforms change.
         frustumCulled={false}
       >
         <OutlinesIfHovered alwaysMounted />
       </skinnedMesh>
     );
   } else {
-    // Normal mesh.
     return (
       <mesh
         ref={ref as React.ForwardedRef<THREE.Mesh>}
